@@ -42,32 +42,9 @@ export function useFlutterBridge() {
   const navigateRef = useRef(navigate);
   navigateRef.current = navigate;
 
-  // ──────────────────────────────────────────────────────────
-  // 🔧 DEBUG BLOCK START — remove this entire block after testing
-  // ──────────────────────────────────────────────────────────
+  // Clear stale browser history on mount to prevent WebView replaying old entries
   useEffect(() => {
-    const originalPush = window.history.pushState;
-    const originalReplace = window.history.replaceState;
-
-    window.history.pushState = function (...args: Parameters<typeof originalPush>) {
-      console.log('🚨 PUSH STATE:', args[2]);
-      return originalPush.apply(this, args);
-    };
-
-    window.history.replaceState = function (...args: Parameters<typeof originalReplace>) {
-      console.log('✅ REPLACE STATE:', args[2]);
-      return originalReplace.apply(this, args);
-    };
-
-    return () => {
-      window.history.pushState = originalPush;
-      window.history.replaceState = originalReplace;
-    };
-  }, []);
-  // 🔧 DEBUG BLOCK END
-  // ──────────────────────────────────────────────────────────
-
-  useEffect(() => {
+    window.history.replaceState(null, '', window.location.pathname);
     if (routeStack.length === 0) {
       routeStack.push(window.location.pathname || '/');
     }
@@ -77,9 +54,6 @@ export function useFlutterBridge() {
   useEffect(() => {
     const path = location.pathname;
     const top = routeStack[routeStack.length - 1];
-
-    // 🔧 DEBUG LOG — remove after testing
-    console.log('📍 ROUTE CHANGED:', path, '| stack:', [...routeStack]);
 
     if (path === '/') {
       routeStack.length = 1;
@@ -96,8 +70,6 @@ export function useFlutterBridge() {
         // Inner page — push normally
         routeStack.push(path);
       }
-      // 🔧 DEBUG LOG — remove after testing
-      console.log('📦 STACK UPDATED:', [...routeStack]);
     }
 
     try {
@@ -114,31 +86,15 @@ export function useFlutterBridge() {
 
       const current = window.location.pathname;
 
-      console.log('🧭 navigateTo called:', {
-        path,
-        current,
-        timestamp: Date.now(),
-        stack: [...routeStack],
-      });
-
       // GUARD: ignore if already on this route
-      if (current === path) {
-        console.log('⏭️ navigateTo ignored: same route');
-        return;
-      }
+      if (current === path) return;
 
       // GUARD: ignore if back was just triggered
-      if (isHandlingBack || (Date.now() - lastBackTime < BACK_GUARD_MS)) {
-        console.log('⏭️ navigateTo ignored: back guard active');
-        return;
-      }
+      if (isHandlingBack || (Date.now() - lastBackTime < BACK_GUARD_MS)) return;
 
       // GUARD: ignore if stack top already matches
       const top = routeStack[routeStack.length - 1];
-      if (top === path) {
-        console.log('⏭️ navigateTo ignored: stack top matches');
-        return;
-      }
+      if (top === path) return;
 
       try {
         if (TAB_ROUTES.has(path)) {
@@ -159,18 +115,13 @@ export function useFlutterBridge() {
     window.appBack = () => {
       const currentPath = routeStack[routeStack.length - 1] || '/';
 
-      // 🔧 DEBUG LOG — remove after testing
-      console.log('🔙 appBack triggered at:', currentPath, '| stack:', [...routeStack]);
-
-      // 🔧 Set back guard
+      // Set back guard
       isHandlingBack = true;
       lastBackTime = Date.now();
       setTimeout(() => { isHandlingBack = false; }, BACK_GUARD_MS);
 
       // If on a non-home tab, go home
       if (TAB_ROUTES.has(currentPath) && currentPath !== '/') {
-        // 🔧 DEBUG LOG — remove after testing
-        console.log('➡️ Tab → navigating to HOME');
         routeStack.length = 1;
         routeStack[0] = '/';
         if (window.location.pathname !== '/') {
@@ -184,8 +135,6 @@ export function useFlutterBridge() {
 
       // If on home or stack ≤ 1, let Flutter handle exit
       if (currentPath === '/' || routeStack.length <= 1) {
-        // 🔧 DEBUG LOG — remove after testing
-        console.log('🏁 ROOT reached — Flutter should exit');
         routeStack.length = 1;
         routeStack[0] = '/';
         return;
@@ -194,8 +143,6 @@ export function useFlutterBridge() {
       // Inner page — pop and go back
       routeStack.pop();
       const previous = routeStack[routeStack.length - 1];
-      // 🔧 DEBUG LOG — remove after testing
-      console.log('⬅️ Inner page back →', previous, '| stack:', [...routeStack]);
       if (window.location.pathname !== previous) {
         navigateRef.current(previous, { replace: true });
       }
@@ -207,20 +154,21 @@ export function useFlutterBridge() {
     window.isRootRoute = () =>
       routeStack.length <= 1 || window.location.pathname === '/';
 
+    // CRITICAL: Use capture phase so this runs BEFORE React Router's popstate listener.
+    // This prevents React Router from processing stale history entries in the WebView.
     const blockPopState = (e: PopStateEvent) => {
       e.stopImmediatePropagation();
+      e.preventDefault();
       const top = routeStack[routeStack.length - 1];
-      // 🔧 DEBUG LOG — remove after testing
-      console.log('🛑 popstate BLOCKED | browser:', window.location.pathname, '| stack top:', top);
       if (window.location.pathname !== top) {
         window.history.replaceState(null, '', top);
       }
     };
 
-    window.addEventListener('popstate', blockPopState);
+    window.addEventListener('popstate', blockPopState, true);
 
     return () => {
-      window.removeEventListener('popstate', blockPopState);
+      window.removeEventListener('popstate', blockPopState, true);
       delete window.navigateTo;
       delete window.appBack;
       delete window.isRootRoute;
