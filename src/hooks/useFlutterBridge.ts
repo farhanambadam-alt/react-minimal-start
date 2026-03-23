@@ -17,11 +17,6 @@ const TAB_ROUTES = new Set(['/', '/at-home', '/explore', '/bookings', '/profile'
 /** Internal navigation stack — single source of truth for back navigation. */
 const routeStack: string[] = [window.location.pathname || '/'];
 
-/** 🔧 Back-navigation guard — blocks stale navigateTo calls after appBack */
-let isHandlingBack = false;
-let lastBackTime = 0;
-const BACK_GUARD_MS = 300;
-
 /**
  * Remove routes matching a prefix from the stack.
  */
@@ -42,7 +37,10 @@ export function useFlutterBridge() {
   const navigateRef = useRef(navigate);
   navigateRef.current = navigate;
 
-  // Clear stale browser history on mount to prevent WebView replaying old entries
+  /** Tracks whether a navigation is currently in progress to prevent re-entry */
+  const isNavigating = useRef(false);
+
+  // Clear stale browser history on mount
   useEffect(() => {
     window.history.replaceState(null, '', window.location.pathname);
     if (routeStack.length === 0) {
@@ -56,21 +54,23 @@ export function useFlutterBridge() {
     const top = routeStack[routeStack.length - 1];
 
     if (path === '/') {
+      // Landing on home — reset stack, do NOT navigate anywhere else
       routeStack.length = 1;
       routeStack[0] = '/';
     } else if (top !== path) {
       if (TAB_ROUTES.has(path)) {
-        // Tab routes always replace the current top entry
         if (routeStack.length > 0) {
           routeStack[routeStack.length - 1] = path;
         } else {
           routeStack.push(path);
         }
       } else {
-        // Inner page — push normally
         routeStack.push(path);
       }
     }
+
+    // Reset navigation lock after route settles
+    isNavigating.current = false;
 
     try {
       if (window.flutter_inappwebview) {
@@ -84,17 +84,19 @@ export function useFlutterBridge() {
     window.navigateTo = (path: string) => {
       if (!path) return;
 
+      // GUARD: prevent re-entrant / rapid-fire navigation
+      if (isNavigating.current) return;
+
       const current = window.location.pathname;
 
-      // GUARD: ignore if already on this route
+      // GUARD: already on this route
       if (current === path) return;
 
-      // GUARD: ignore if back was just triggered
-      if (isHandlingBack || (Date.now() - lastBackTime < BACK_GUARD_MS)) return;
-
-      // GUARD: ignore if stack top already matches
+      // GUARD: stack top already matches
       const top = routeStack[routeStack.length - 1];
       if (top === path) return;
+
+      isNavigating.current = true;
 
       try {
         if (TAB_ROUTES.has(path)) {
@@ -108,17 +110,18 @@ export function useFlutterBridge() {
         }
         navigateRef.current(path, { replace: TAB_ROUTES.has(path) });
       } catch (e) {
+        isNavigating.current = false;
         console.error('Navigation error:', e);
       }
     };
 
     window.appBack = () => {
+      // GUARD: prevent re-entrant back
+      if (isNavigating.current) return;
+
       const currentPath = routeStack[routeStack.length - 1] || '/';
 
-      // Set back guard
-      isHandlingBack = true;
-      lastBackTime = Date.now();
-      setTimeout(() => { isHandlingBack = false; }, BACK_GUARD_MS);
+      isNavigating.current = true;
 
       // If on a non-home tab, go home
       if (TAB_ROUTES.has(currentPath) && currentPath !== '/') {
@@ -126,6 +129,8 @@ export function useFlutterBridge() {
         routeStack[0] = '/';
         if (window.location.pathname !== '/') {
           navigateRef.current('/', { replace: true });
+        } else {
+          isNavigating.current = false;
         }
         try {
           window.flutter_inappwebview?.callHandler('routeChanged', '/');
@@ -137,6 +142,7 @@ export function useFlutterBridge() {
       if (currentPath === '/' || routeStack.length <= 1) {
         routeStack.length = 1;
         routeStack[0] = '/';
+        isNavigating.current = false;
         return;
       }
 
@@ -145,6 +151,8 @@ export function useFlutterBridge() {
       const previous = routeStack[routeStack.length - 1];
       if (window.location.pathname !== previous) {
         navigateRef.current(previous, { replace: true });
+      } else {
+        isNavigating.current = false;
       }
       try {
         window.flutter_inappwebview?.callHandler('routeChanged', previous);
@@ -154,8 +162,7 @@ export function useFlutterBridge() {
     window.isRootRoute = () =>
       routeStack.length <= 1 || window.location.pathname === '/';
 
-    // CRITICAL: Use capture phase so this runs BEFORE React Router's popstate listener.
-    // This prevents React Router from processing stale history entries in the WebView.
+    // Block stale popstate events from WebView history
     const blockPopState = (e: PopStateEvent) => {
       e.stopImmediatePropagation();
       e.preventDefault();
